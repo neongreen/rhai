@@ -602,6 +602,25 @@ impl Engine {
                     _ => (),
                 }
             },
+            Stmt::For(ref name, ref expr, ref body) => {
+                let arr = self.eval_expr(scope, expr)?;
+                if let Some(arr) = arr.downcast_ref::<Vec<Box<Any>>>() {
+                    scope.push((name.clone(), Box::new(())));
+                    let idx = scope.len() - 1;
+                    for a in arr.iter() {
+                        scope[idx].1 = a.clone();
+                        match self.eval_stmt(scope, body) {
+                            Err(EvalAltResult::LoopBreak) => { break },
+                            Err(x) => return Err(x),
+                            _ => (),
+                        }
+                    }
+                    scope.remove(idx);
+                    Ok(Box::new(()))
+                } else {
+                    return Err(EvalAltResult::ErrorIfGuardMismatch); // *FIXME*
+                }
+            },
             Stmt::Break => Err(EvalAltResult::LoopBreak),
             Stmt::Return => Err(EvalAltResult::Return(Box::new(()))),
             Stmt::ReturnWithVal(ref a) => {
