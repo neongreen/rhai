@@ -12,7 +12,7 @@ use fn_register::{Mut, RegisterFn};
 use parser::{lex, parse, Expr, FnDef, Stmt};
 use call::FunArgs;
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
 pub enum EvalAltResult {
     ErrorFunctionNotFound(String),
     ErrorFunctionArgMismatch,
@@ -24,10 +24,13 @@ pub enum EvalAltResult {
     ErrorAssignmentToUnknownLHS,
     ErrorMismatchOutputType(String),
     ErrorCantOpenScriptFile,
+    ErrorRuntime(String),
     InternalErrorMalformedDotExpression,
     LoopBreak,
     Return(Box<Any>),
 }
+
+pub type RhaiResult<T> = Result<T,EvalAltResult>;
 
 impl EvalAltResult {
     fn as_str(&self) -> Option<&str> {
@@ -35,6 +38,7 @@ impl EvalAltResult {
             EvalAltResult::ErrorVariableNotFound(ref s) => Some(s.as_str()),
             EvalAltResult::ErrorFunctionNotFound(ref s) => Some(s.as_str()),
             EvalAltResult::ErrorMismatchOutputType(ref s) => Some(s.as_str()),
+            EvalAltResult::ErrorRuntime(ref s) => Some(s.as_str()),
             _ => None
         }
     }
@@ -54,6 +58,7 @@ impl PartialEq for EvalAltResult {
             (&ErrorFunctionArityNotSupported, &ErrorFunctionArityNotSupported) => true,
             (&ErrorAssignmentToUnknownLHS, &ErrorAssignmentToUnknownLHS) => true,
             (&ErrorMismatchOutputType(ref a), &ErrorMismatchOutputType(ref b)) => a == b,
+            (&ErrorRuntime(ref a), &ErrorRuntime(ref b)) => a == b,
             (&ErrorCantOpenScriptFile, &ErrorCantOpenScriptFile) => true,
             (&InternalErrorMalformedDotExpression, &InternalErrorMalformedDotExpression) => true,
             (&LoopBreak, &LoopBreak) => true,
@@ -81,6 +86,7 @@ impl Error for EvalAltResult {
             }
             EvalAltResult::ErrorMismatchOutputType(_) => "Cast of output failed",
             EvalAltResult::ErrorCantOpenScriptFile => "Cannot open script file",
+            EvalAltResult::ErrorRuntime(_) => "Script error",
             EvalAltResult::InternalErrorMalformedDotExpression => {
                 "[Internal error] Unexpected expression in dot expression"
             }
@@ -124,11 +130,12 @@ pub struct FnSpec {
 ///     }
 /// }
 /// ```
-// #[derive(Clone)]
+#[derive(Clone)]
 pub struct Engine {
     /// A hashmap containing all functions known to the engine
     pub fns: HashMap<FnSpec, Arc<FnIntExt>>,
     pub type_names: HashMap<TypeId,String>,
+    pub result_handlers: HashMap<TypeId,Arc<Fn(Box<Any>)-> RhaiResult<Box<Any>>>>,
 }
 
 pub enum FnIntExt {
@@ -214,6 +221,14 @@ impl Engine {
                     }
                 }
             })
+            .and_then(|res| {
+                let tid = (&*res).type_id();
+                if let Some(result_handler) = self.result_handlers.get(&tid) {
+                    result_handler(res)
+                } else {
+                    Ok(res)
+                }
+            })
     }
 
     pub fn register_fn_raw(&mut self, ident: String, args: Option<Vec<TypeId>>, f: Box<FnAny>) {
@@ -226,12 +241,23 @@ impl Engine {
 
     /// Register a type for use with Engine. Keep in mind that
     /// your type must implement Clone.
-    pub fn register_type<T: Any>(&mut self) {
+    pub fn register_type<T: Any + Clone>(&mut self) {
         // currently a no-op, exists for future extensibility
+        let tid = TypeId::of::<RhaiResult<T>>();
+        debug_println!("Result type {:?}", tid);
+        self.result_handlers.insert(
+            tid,
+            Arc::new(move |a: Box<Any>| {
+                match a.downcast_ref::<RhaiResult<T>>().unwrap() {
+                    Ok(v) => Ok(Box::new(v.clone())),
+                    Err(e) => Err(e.clone())
+                }
+            })
+        );
     }
 
     /// Register a type, providing a name for nice error messages.
-    pub fn register_type_name<T: Any>(&mut self, name: &str) {
+    pub fn register_type_name<T: Any + Clone>(&mut self, name: &str) {
         self.register_type::<T>();
         debug_println!("register type {}: {:?}", name, TypeId::of::<T>());
         self.type_names.insert(TypeId::of::<T>(), name.into());
@@ -870,6 +896,20 @@ impl Engine {
         engine.register_fn("+", concat);
         engine.register_fn("==", unit_eq);
 
+        fn throw(a: Vec<&mut Any>) -> RhaiResult<Box<Any>> {
+            if a.len() != 1 {
+                return Err(EvalAltResult::ErrorMismatchOutputType("takes one argument".into()));
+            }
+            if let Some(msg) = a[0].downcast_ref::<String>() {
+                let err: RhaiResult<String> = Err(EvalAltResult::ErrorRuntime(msg.clone()));
+                Ok(Box::new(err))
+            } else {
+                Err(EvalAltResult::ErrorMismatchOutputType("argument must be string".into()))
+            }
+        }
+
+        engine.register_fn_raw("throw".into(), None, Box::new(throw));
+
         // engine.register_fn("[]", idx);
         // FIXME?  Registering array lookups are a special case because we want to return boxes
         // directly let ent = engine.fns.entry("[]".to_string()).or_insert_with(Vec::new);
@@ -882,6 +922,7 @@ impl Engine {
         let mut engine = Engine {
             fns: HashMap::new(),
             type_names: HashMap::new(),
+            result_handlers: HashMap::new(),
         };
 
         Engine::register_default_lib(&mut engine);
