@@ -110,6 +110,8 @@ pub struct FnSpec {
     args: Option<Vec<TypeId>>,
 }
 
+type IteratorFn = Fn(&Box<Any>)->Box<Iterator<Item=Box<Any>>>;
+
 /// Rhai's engine type. This is what you use to run Rhai scripts
 ///
 /// ```rust
@@ -129,6 +131,7 @@ pub struct Engine {
     /// A hashmap containing all functions known to the engine
     pub fns: HashMap<FnSpec, Arc<FnIntExt>>,
     pub type_names: HashMap<TypeId,String>,
+    pub type_iterators: HashMap<TypeId,Arc<IteratorFn>>,
 }
 
 pub enum FnIntExt {
@@ -235,6 +238,11 @@ impl Engine {
         self.register_type::<T>();
         debug_println!("register type {}: {:?}", name, TypeId::of::<T>());
         self.type_names.insert(TypeId::of::<T>(), name.into());
+    }
+
+    /// Register an iterator adapter for a type.
+    pub fn register_iterator<T: Any, F: Fn(&Box<Any>)->Box<Iterator<Item=Box<Any>>> + 'static>(&mut self, f: F) {
+        self.type_iterators.insert(TypeId::of::<T>(), Arc::new(f));
     }
 
     /// Register a get function for a member of a registered type
@@ -604,11 +612,12 @@ impl Engine {
             },
             Stmt::For(ref name, ref expr, ref body) => {
                 let arr = self.eval_expr(scope, expr)?;
-                if let Some(arr) = arr.downcast_ref::<Vec<Box<Any>>>() {
+                let tid = (&*arr).type_id();
+                if let Some(iter_fn) = self.type_iterators.get(&tid) {
                     scope.push((name.clone(), Box::new(())));
                     let idx = scope.len() - 1;
-                    for a in arr.iter() {
-                        scope[idx].1 = a.clone();
+                    for a in iter_fn(&arr) {
+                        scope[idx].1 = a;
                         match self.eval_stmt(scope, body) {
                             Err(EvalAltResult::LoopBreak) => { break },
                             Err(x) => return Err(x),
@@ -889,6 +898,21 @@ impl Engine {
         engine.register_fn("+", concat);
         engine.register_fn("==", unit_eq);
 
+        engine.register_iterator::<Vec<Box<Any>>,_>(|a| {
+            Box::new(a.downcast_ref::<Vec<Box<Any>>>().unwrap().clone().into_iter())
+        });
+
+        use std::ops::Range;
+        engine.register_iterator::<Range<i64>,_>(|a| {
+            let iter = a.downcast_ref::<Range<i64>>().unwrap().clone();
+            Box::new(iter.map(|n| Box::new(n) as Box<Any>))
+        });
+
+        engine.register_fn("range", |i1:i64,i2:i64| {
+            (i1..i2)
+        });
+
+
         // engine.register_fn("[]", idx);
         // FIXME?  Registering array lookups are a special case because we want to return boxes
         // directly let ent = engine.fns.entry("[]".to_string()).or_insert_with(Vec::new);
@@ -901,6 +925,7 @@ impl Engine {
         let mut engine = Engine {
             fns: HashMap::new(),
             type_names: HashMap::new(),
+            type_iterators: HashMap::new(),
         };
 
         Engine::register_default_lib(&mut engine);
