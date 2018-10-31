@@ -687,6 +687,18 @@ impl Engine {
         scope: &mut Scope,
         input: &str,
     ) -> Result<T, EvalAltResult> {
+        match self.eval_with_scope_boxed(scope, input)?.downcast::<T>() {
+            Ok(out) => Ok(*out),
+            Err(a) => Err(EvalAltResult::ErrorMismatchOutputType(self.nice_type_name(a))),
+        }
+    }
+
+    /// Evaluate with own scope, returning a box
+    pub fn eval_with_scope_boxed(
+        &mut self,
+        scope: &mut Scope,
+        input: &str,
+    ) -> Result<Box<Any>, EvalAltResult> {
         let tokens = lex(input);
 
         let mut peekables = tokens.peekable();
@@ -715,12 +727,7 @@ impl Engine {
                     }
                 }
 
-                let x = x?;
-
-                match x.downcast::<T>() {
-                    Ok(out) => Ok(*out),
-                    Err(a) => Err(EvalAltResult::ErrorMismatchOutputType(self.nice_type_name(a))),
-                }
+                x
             }
             Err(_) => Err(EvalAltResult::ErrorFunctionArgMismatch),
         }
