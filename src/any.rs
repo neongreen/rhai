@@ -1,7 +1,7 @@
 use std::any::{Any as StdAny, TypeId};
 use std::fmt;
 
-pub trait Any: StdAny {
+pub trait Any: StdAny + fmt::Debug {
     fn type_id(&self) -> TypeId;
 
     fn box_clone(&self) -> Box<Any>;
@@ -13,7 +13,7 @@ pub trait Any: StdAny {
 
 impl<T> Any for T
     where
-        T: Clone + StdAny + ?Sized
+        T: Clone + StdAny + fmt::Debug + ?Sized
 {
     #[inline]
     fn type_id(&self) -> TypeId {
@@ -68,12 +68,6 @@ impl Any {
 impl Clone for Box<Any> {
     fn clone(&self) -> Self {
         Any::box_clone(self.as_ref() as &Any)
-    }
-}
-
-impl fmt::Debug for Any {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.pad("Any")
     }
 }
 
